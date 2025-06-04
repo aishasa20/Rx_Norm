@@ -189,92 +189,69 @@ def parse_drug_name_comprehensive(drug_name: str) -> Dict[str, str]:
     
     return result
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour
+@st.cache_data(ttl=3600)
 def search_rxnorm_api(search_term: str) -> pd.DataFrame:
     """
-    Search the RxNorm API for drug information and return a comprehensive DataFrame 
-    matching the expected CSV format.
+    Search the RxNorm API for drug information and return only results that visibly contain the search term.
     """
     if not search_term or len(search_term.strip()) < 2:
         return pd.DataFrame()
-    
-    # Clean the search term
-    search_term = search_term.strip()
-    
-    # API endpoint
+
+    search_term_lower = search_term.strip().lower()
     api_url = f"https://rxnav.nlm.nih.gov/REST/drugs.json?name={search_term}"
-    
+
     try:
-        # Make the API request with timeout
         response = requests.get(api_url, timeout=10)
         response.raise_for_status()
-        
-        # Parse JSON response
         data = response.json()
-        
-        # Extract drug information
+
         drugs_data = []
-        
+
         if 'drugGroup' in data and 'conceptGroup' in data['drugGroup']:
             concept_groups = data['drugGroup']['conceptGroup']
-            
-            # Handle both single concept group and list of concept groups
             if not isinstance(concept_groups, list):
                 concept_groups = [concept_groups]
-            
+
             for group in concept_groups:
                 if 'conceptProperties' in group:
                     concept_properties = group['conceptProperties']
-                    
-                    # Handle both single concept and list of concepts
                     if not isinstance(concept_properties, list):
                         concept_properties = [concept_properties]
-                    
+
                     for concept in concept_properties:
-                        # Extract basic fields from the RxNorm API response
                         rxcui = concept.get('rxcui', '')
-                        name = concept.get('n', '')  # This is the full drug name
-                        synonym = concept.get('synonym', '')  # This often contains the brand version
+                        name = concept.get('n', '')
+                        synonym = concept.get('synonym', '')
                         term_type = concept.get('tty', '')
                         suppress = concept.get('suppress', '')
-                        
-                        # Use the most complete name available
+
+                        # Skip suppressed concepts
+                        if suppress and suppress not in ['N', '']:
+                            continue
+
+                        # Use name or synonym
                         primary_name = name if name else synonym
                         if not primary_name:
                             continue
-                            
-                        # Parse the primary drug name
+
+                        # Filter: must contain search term in visible fields
+                        fields_to_check = [name, synonym]
+                        if not any(search_term_lower in (field or '').lower() for field in fields_to_check):
+                            continue
+
                         parsed_info = parse_drug_name_comprehensive(primary_name)
-                        
-                        # Also parse synonym if it exists and is different
-                        synonym_info = {}
-                        if synonym and synonym != name:
-                            synonym_info = parse_drug_name_comprehensive(synonym)
-                        
-                        # Determine brand name - prefer from synonym if it's a branded version
-                        brand_name = None
-                        if synonym_info.get('brand_name'):
-                            brand_name = synonym_info['brand_name']
-                        elif parsed_info.get('brand_name'):
-                            brand_name = parsed_info['brand_name']
-                        
-                        # Create display name
-                        display_name = parsed_info.get('display_name', '')
-                        if not display_name and parsed_info.get('ingredient'):
-                            if parsed_info.get('route'):
-                                display_name = f"{parsed_info['ingredient']} ({parsed_info['route']})"
-                            else:
-                                display_name = parsed_info['ingredient']
-                        
-                        # Create RxTerms dose form
+                        synonym_info = parse_drug_name_comprehensive(synonym) if synonym and synonym != name else {}
+
+                        brand_name = synonym_info.get('brand_name') or parsed_info.get('brand_name')
+                        display_name = parsed_info.get('display_name') or parsed_info.get('ingredient')
+
                         rxterms_dose_form = None
                         if parsed_info.get('dose_form'):
                             if parsed_info.get('volume'):
                                 rxterms_dose_form = f"{parsed_info['dose_form']} {parsed_info['volume']}"
                             else:
                                 rxterms_dose_form = parsed_info['dose_form']
-                        
-                        # Create comprehensive drug info matching CSV structure
+
                         drug_info = {
                             'brandName': brand_name,
                             'displayName': display_name,
@@ -286,46 +263,31 @@ def search_rxnorm_api(search_term: str) -> pd.DataFrame:
                             'route': parsed_info.get('route'),
                             'termType': term_type,
                             'rxcui': int(rxcui) if rxcui and rxcui.isdigit() else None,
-                            'genericRxcui': None,  # Will be populated by additional API call if needed
+                            'genericRxcui': None,
                             'rxnormDoseForm': parsed_info.get('dose_form'),
-                            'suppress': suppress if suppress and suppress not in ['N', ''] else None
+                            'suppress': None
                         }
-                        
+
                         drugs_data.append(drug_info)
-        
-        # Create DataFrame
+
+        required_columns = [
+            'brandName', 'displayName', 'synonym', 'fullName', 
+            'fullGenericName', 'strength', 'rxtermsDoseForm', 'route',
+            'termType', 'rxcui', 'genericRxcui', 'rxnormDoseForm', 'suppress'
+        ]
+
         if drugs_data:
             df = pd.DataFrame(drugs_data)
-            
-            # Ensure all required columns exist
-            required_columns = [
-                'brandName', 'displayName', 'synonym', 'fullName', 
-                'fullGenericName', 'strength', 'rxtermsDoseForm', 'route',
-                'termType', 'rxcui', 'genericRxcui', 'rxnormDoseForm', 'suppress'
-            ]
-            
             for col in required_columns:
                 if col not in df.columns:
                     df[col] = None
-            
-            # Reorder columns to match CSV format
             df = df[required_columns]
-            
-            # Sort by displayName for better organization
             df = df.sort_values('displayName', na_position='last')
-            
-            # Remove duplicates based on rxcui
             df = df.drop_duplicates(subset=['rxcui'], keep='first')
-            
             return df.reset_index(drop=True)
         else:
-            # Return empty DataFrame with correct structure
-            return pd.DataFrame(columns=[
-                'brandName', 'displayName', 'synonym', 'fullName', 
-                'fullGenericName', 'strength', 'rxtermsDoseForm', 'route',
-                'termType', 'rxcui', 'genericRxcui', 'rxnormDoseForm', 'suppress'
-            ])
-            
+            return pd.DataFrame(columns=required_columns)
+
     except requests.exceptions.RequestException as e:
         st.error(f"API request failed: {str(e)}")
         return pd.DataFrame()
@@ -335,6 +297,7 @@ def search_rxnorm_api(search_term: str) -> pd.DataFrame:
     except Exception as e:
         st.error(f"An unexpected error occurred: {str(e)}")
         return pd.DataFrame()
+
 
 # Main application interface
 col1, col2 = st.columns([3, 1])
