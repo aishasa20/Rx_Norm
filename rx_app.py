@@ -192,7 +192,8 @@ def parse_drug_name_comprehensive(drug_name: str) -> Dict[str, str]:
 @st.cache_data(ttl=3600)
 def search_rxnorm_api(search_term: str) -> pd.DataFrame:
     """
-    Search the RxNorm API for drug information and return only results that visibly contain the search term.
+    Search the RxNorm API for drug information and return a comprehensive DataFrame,
+    filtering intelligently to include valid branded and generic results.
     """
     if not search_term or len(search_term.strip()) < 2:
         return pd.DataFrame()
@@ -225,20 +226,24 @@ def search_rxnorm_api(search_term: str) -> pd.DataFrame:
                         term_type = concept.get('tty', '')
                         suppress = concept.get('suppress', '')
 
-                        # Skip suppressed concepts
+                        # Skip suppressed entries
                         if suppress and suppress not in ['N', '']:
                             continue
 
-                        # Use name or synonym
+                        # Use primary name or synonym
                         primary_name = name if name else synonym
                         if not primary_name:
                             continue
 
-                        # Filter: must contain search term in visible fields
-                        fields_to_check = [name, synonym]
-                        if not any(search_term_lower in (field or '').lower() for field in fields_to_check):
+                        # Matching logic
+                        visible_match = any(search_term_lower in (field or '').lower() for field in [name, synonym])
+                        clinical_match = term_type in ['SCD', 'SBD'] and search_term_lower in (name + synonym).lower()
+                        ingredient_match = term_type == 'IN' and search_term_lower in (name + synonym).lower()
+
+                        if not (visible_match or clinical_match or ingredient_match):
                             continue
 
+                        # Parse display and other info
                         parsed_info = parse_drug_name_comprehensive(primary_name)
                         synonym_info = parse_drug_name_comprehensive(synonym) if synonym and synonym != name else {}
 
@@ -247,10 +252,10 @@ def search_rxnorm_api(search_term: str) -> pd.DataFrame:
 
                         rxterms_dose_form = None
                         if parsed_info.get('dose_form'):
-                            if parsed_info.get('volume'):
-                                rxterms_dose_form = f"{parsed_info['dose_form']} {parsed_info['volume']}"
-                            else:
-                                rxterms_dose_form = parsed_info['dose_form']
+                            rxterms_dose_form = (
+                                f"{parsed_info['dose_form']} {parsed_info['volume']}"
+                                if parsed_info.get('volume') else parsed_info['dose_form']
+                            )
 
                         drug_info = {
                             'brandName': brand_name,
@@ -270,8 +275,9 @@ def search_rxnorm_api(search_term: str) -> pd.DataFrame:
 
                         drugs_data.append(drug_info)
 
+        # Build DataFrame
         required_columns = [
-            'brandName', 'displayName', 'synonym', 'fullName', 
+            'brandName', 'displayName', 'synonym', 'fullName',
             'fullGenericName', 'strength', 'rxtermsDoseForm', 'route',
             'termType', 'rxcui', 'genericRxcui', 'rxnormDoseForm', 'suppress'
         ]
