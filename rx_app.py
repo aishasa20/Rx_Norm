@@ -80,4 +80,3 @@ if q and len(q.strip())>=2:
         st.warning(f"No results for '{q}'.")
 else:
     st.info("Enter at least 2 characters to search.")
-
